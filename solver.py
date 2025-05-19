@@ -1,6 +1,7 @@
 import socket
 import sys
 from typing import Tuple, Optional
+from collections import OrderedDict
 
 class GameClient:
     def __init__(self, ip: str, port: int, player_number: int, nickname: str, depth: int):
@@ -13,7 +14,8 @@ class GameClient:
         self.player_symbol = 'X' if player_number == 1 else 'O'
         self.opponent_symbol = 'O' if player_number == 1 else 'X'
         self.board = [['-' for _ in range(5)] for _ in range(5)]
-        self.transposition_table = {}
+        self.transposition_table = OrderedDict()
+        self.MAX_TT_SIZE = 10000
 
     def connect(self) -> None:
         print(f"Connecting to {self.server_address}...")
@@ -43,10 +45,27 @@ class GameClient:
         return ''.join(''.join(row) for row in self.board)
 
     def print_board(self) -> None:
-        print("  " + " ".join(str(i) for i in range(1, 6)))  # nagłówek kolumn
+        print("  " + " ".join(str(i) for i in range(1, 6)))
         for i, row in enumerate(self.board, start=1):
             print(f"{i} " + " ".join(row))
         print()
+    
+    def _get_from_tt(self, key) -> Optional[float]:
+        if key in self.transposition_table:
+            value = self.transposition_table[key]
+            self.transposition_table.move_to_end(key)
+            return value
+        return None
+
+    def _store_in_tt(self, key, value: float) -> None:
+        if key in self.transposition_table:
+            self.transposition_table[key] = value
+            self.transposition_table.move_to_end(key)
+        else:
+            # Add new entry
+            if len(self.transposition_table) >= self.MAX_TT_SIZE:
+                self.transposition_table.popitem(last=False)
+            self.transposition_table[key] = value
 
     def start_game_loop(self) -> None:
         greeting = self.receive()
@@ -71,9 +90,10 @@ class GameClient:
                 print(f"Opponent played move: {move}")
 
             if code in {0, 6}:  
-                move_input = self.choose_move()
-                self.update_board(move_input, self.player_number)
-                self.send(str(move_input))
+                move = self.choose_move()
+                self.update_board(move, self.player_number)
+                self.print_board()
+                self.send(str(move))
             elif code in {1, 2, 3, 4, 5}:  
                 self.handle_game_end(code)
                 break
@@ -102,67 +122,58 @@ class GameClient:
 
     def minmax(self, depth: int, is_maximizing: bool, alpha: float = float('-inf'), beta: float = float('inf')) -> float:
         board_key = self._board_to_string()
-        tt_key = (board_key, depth, is_maximizing)
+        tt_key = (board_key, depth, is_maximizing, self.player_symbol)
 
-        if tt_key in self.transposition_table:
-            return self.transposition_table[tt_key]
+        cached_value = self._get_from_tt(tt_key)
+        if cached_value is not None:
+            return cached_value
 
         result = self.check_game_over()
         if result is not None:
+            self._store_in_tt(tt_key, result)
             return result
     
         if depth == 0:
             score = self.evaluate()
-            self.transposition_table[tt_key] = score
+            self._store_in_tt(tt_key, score)
             return score
         
         moves = self.get_available_moves()
         if not moves:
+            self._store_in_tt(tt_key, 0)
             return 0
 
         if is_maximizing:
             max_eval = float('-inf')
             for row, col in moves:
                 self.board[row][col] = self.player_symbol
-
-                if self.three_in_row(row, col, self.player_symbol):
-                    self.board[row][col] = '-'
-                    continue
-
                 eval = self.minmax(depth - 1, False, alpha, beta)
-
                 self.board[row][col] = '-'    
-
-                max_eval = max(max_eval, eval)
             
                 max_eval = max(max_eval, eval)
                 alpha = max(alpha, eval)
                 if beta <= alpha:
-                    break  # odcięcie
-            self.transposition_table[tt_key] = max_eval
+                    break
+            
+            self._store_in_tt(tt_key, max_eval)
             return max_eval
         else:
             min_eval = float('inf')
-            for row, col in moves:
+            for row, col in moves:   
                 self.board[row][col] = self.opponent_symbol
-        
-                if self.three_in_row(row, col, self.opponent_symbol):
-                    self.board[row][col] = '-'
-                    continue
-            
                 eval = self.minmax(depth - 1, True, alpha, beta)
-            
                 self.board[row][col] = '-'
             
                 min_eval = min(min_eval, eval)
             
                 beta = min(beta, eval)
                 if beta <= alpha:
-                    break  # odcięcie
-            self.transposition_table[tt_key] = min_eval
+                    break
+            
+            self._store_in_tt(tt_key, min_eval)
             return min_eval
 
-    def three_in_row(self, row: int, col: int, symbol: str) -> bool:  
+    def count_consecutive(self, row: int, col: int, symbol: str) -> int:  
         directions = [
             (0, 1),   # poziomo
             (1, 0),   # pionowo
@@ -170,6 +181,7 @@ class GameClient:
             (1, -1),  # ukośnie "/"
         ]
 
+        max_count = 1
         for dr, dc in directions:
             count = 1
 
@@ -187,26 +199,30 @@ class GameClient:
                 r -= dr
                 c -= dc
 
-            if count >= 3:
-                return True
+            max_count = max(max_count, count)
 
-        return False
+        return max_count
     
     def get_available_moves(self) -> list[Tuple[int, int]]:
-        return [(i, j) for i in range(5) for j in range(5) if self.board[i][j] == '-']
+        moves = [(r, c) for r in range(5) for c in range(5) if self.board[r][c] == '-']
+        moves.sort(key=lambda move: abs(move[0] - 2) + abs(move[1] - 2))
+        return moves
     
     def check_game_over(self) -> Optional[int]:
         for row in range(5):
             for col in range(5):
                 symbol = self.board[row][col]
-                if symbol != '-' and self.three_in_row(row, col, symbol):
-                    return 1 if symbol == self.player_symbol else -1
+                if symbol != '-':
+                    count = self.count_consecutive(row, col, symbol)
+                    if count >= 4:
+                        return 10000 if symbol == self.player_symbol else -10000
+                    elif count == 3:
+                        return -10000 if symbol == self.player_symbol else 10000
         return None
-
     
     def evaluate(self) -> float:
         score = 0
-        center_positions = [(2, 2), (1, 2), (2, 1), (2, 3), (3, 2)]
+        center_positions = [(2, 3), (3, 2), (3, 3), (4, 3), (3, 4)]
 
         for row in range(5):
             for col in range(5):
@@ -215,50 +231,92 @@ class GameClient:
                     continue
 
                 is_player = current == self.player_symbol
-                is_opponent = current == self.opponent_symbol
                 player_multiplier = 1 if is_player else -1
 
-                # Preferencja środka
                 if (row, col) in center_positions:
-                    score += 5 * player_multiplier
+                    score += 1000 * player_multiplier
 
-                # 4 kierunki
                 for dr, dc in [(0, 1), (1, 0), (1, 1), (1, -1)]:
-                    count = 1
-                    open_ends = 0
+                    pattern_score = self.evaluate_pattern(row, col, dr, dc, current)
+                    score += pattern_score * player_multiplier
 
-                    # Przód
-                    r, c = row + dr, col + dc
-                    while 0 <= r < 5 and 0 <= c < 5 and self.board[r][c] == current:
-                        count += 1
-                        r += dr
-                        c += dc
-                    if 0 <= r < 5 and 0 <= c < 5 and self.board[r][c] == '-':
-                        open_ends += 1
-
-                    # Tył
-                    r, c = row - dr, col - dc
-                    while 0 <= r < 5 and 0 <= c < 5 and self.board[r][c] == current:
-                        count += 1
-                        r -= dr
-                        c -= dc
-                    if 0 <= r < 5 and 0 <= c < 5 and self.board[r][c] == '-':
-                        open_ends += 1
-
-                    # Punktacja
-                    if count == 2:
-                        score += 10 * open_ends * player_multiplier
-                    elif count == 3:
-                        score += 100 * open_ends * player_multiplier
-                    elif count >= 4:
-                        score += 1000 * player_multiplier
+                consecutive = self.count_consecutive(row, col, current)
+                if consecutive == 3:
+                    if is_player:
+                        score -= 10000
+                    else:
+                        score += 10000
+                elif consecutive >= 4:
+                    if is_player:
+                        score += 10000
+                    else:
+                        score -= 10000
 
         for row, col in self.get_available_moves():
-            self.board[row][col] = self.opponent_symbol
-            if self.three_in_row(row, col, self.opponent_symbol):
-                score += 75 
+            self.board[row][col] = self.player_symbol
+            consecutive = self.count_consecutive(row, col, self.player_symbol)
+            if consecutive >= 4:
+                score += 10000
+            elif consecutive == 3:
+                score -= 10000
             self.board[row][col] = '-'
-            
+
+        
+            self.board[row][col] = self.opponent_symbol
+            consecutive = self.count_consecutive(row, col, self.opponent_symbol)
+            if consecutive >= 4:
+                score -= 10000
+            elif consecutive == 3:
+                score += 10000
+            self.board[row][col] = '-'
+
+        return score
+
+
+    def evaluate_pattern(self, row: int, col: int, dr: int, dc: int, symbol: str) -> float:
+        pattern = []
+
+        # Collect pattern in negative direction
+        r, c = row - dr, col - dc
+        while 0 <= r < 5 and 0 <= c < 5:
+            pattern.insert(0, self.board[r][c])
+            r -= dr
+            c -= dc
+
+        # Add current position
+        pattern.append(symbol)
+
+        # Collect pattern in positive direction
+        r, c = row + dr, col + dc
+        while 0 <= r < 5 and 0 <= c < 5:
+            pattern.append(self.board[r][c])
+            r += dr
+            c += dc
+
+        score = 0
+        consecutive = 0
+        has_gap = False
+
+        for cell in pattern:
+            if cell == symbol:
+                consecutive += 1
+            elif cell == '-':
+                if consecutive > 0:
+                    has_gap = True
+            else:
+                break  # przeciwnik - przerywa wzorzec
+
+        if consecutive == 1:
+            score += 2
+        elif consecutive == 2:
+            score += 10
+            if has_gap:
+                score += 20
+        elif consecutive == 3:
+            score -= 10000
+        elif consecutive >= 4:
+            score += 10000
+
         return score
 
     def handle_game_end(self, code: int) -> None:
