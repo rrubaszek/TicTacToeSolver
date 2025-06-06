@@ -73,6 +73,7 @@ class GameClient:
 
         self.send(f"{self.player_number} {self.nickname}")
 
+        ctr: int = 0
         while True:
             raw_msg = self.receive()
             if not raw_msg:
@@ -89,7 +90,10 @@ class GameClient:
                 self.print_board()
                 print(f"Opponent played move: {move}")
 
-            if code in {0, 6}:  
+            if code in {0, 6}:
+                # if self.depth >= 3 and ctr < self.depth:
+                #     move = self.choose_precomputated_move()
+                # else:   
                 move = self.choose_move()
                 self.update_board(move, self.player_number)
                 self.print_board()
@@ -98,8 +102,14 @@ class GameClient:
                 self.handle_game_end(code)
                 break
 
+            ctr = ctr + 1
+
         self.socket.close()
         print("Disconnected.")
+
+    def choose_precomputated_move(self) -> int:
+        # TODO: implement opening book
+        return 3 * 10 + 3
 
     def choose_move(self) -> int:
         best_score = float('-inf')
@@ -205,7 +215,7 @@ class GameClient:
     
     def get_available_moves(self) -> list[Tuple[int, int]]:
         moves = [(r, c) for r in range(5) for c in range(5) if self.board[r][c] == '-']
-        moves.sort(key=lambda move: abs(move[0] - 2) + abs(move[1] - 2))
+        #  moves.sort(key=lambda move: abs(move[0] - 3) + abs(move[1] - 3))
         return moves
     
     def check_game_over(self) -> Optional[int]:
@@ -222,7 +232,7 @@ class GameClient:
     
     def evaluate(self) -> float:
         score = 0
-        center_positions = [(2, 3), (3, 2), (3, 3), (4, 3), (3, 4)]
+        center_positions = [(2, 2), (1, 2), (3, 2), (2, 1), (2, 3)]
 
         for row in range(5):
             for col in range(5):
@@ -234,7 +244,7 @@ class GameClient:
                 player_multiplier = 1 if is_player else -1
 
                 if (row, col) in center_positions:
-                    score += 1000 * player_multiplier
+                    score += 10000 * player_multiplier
 
                 for dr, dc in [(0, 1), (1, 0), (1, 1), (1, -1)]:
                     pattern_score = self.evaluate_pattern(row, col, dr, dc, current)
@@ -242,15 +252,17 @@ class GameClient:
 
                 consecutive = self.count_consecutive(row, col, current)
                 if consecutive == 3:
-                    if is_player:
-                        score -= 10000
-                    else:
-                        score += 10000
+                    score -= 10000 * player_multiplier
+                    # if is_player:
+                    #     score -= 10000
+                    # else:
+                    #     score += 10000
                 elif consecutive >= 4:
-                    if is_player:
-                        score += 10000
-                    else:
-                        score -= 10000
+                    score += 10000 * player_multiplier
+                    # if is_player:
+                    #     score += 10000
+                    # else:
+                    #     score -= 10000
 
         for row, col in self.get_available_moves():
             self.board[row][col] = self.player_symbol
@@ -261,7 +273,6 @@ class GameClient:
                 score -= 10000
             self.board[row][col] = '-'
 
-        
             self.board[row][col] = self.opponent_symbol
             consecutive = self.count_consecutive(row, col, self.opponent_symbol)
             if consecutive >= 4:
@@ -332,7 +343,7 @@ class GameClient:
 
 def parse_args() -> Tuple[str, int, int, str, int]:
     if len(sys.argv) != 6:
-        print("Usage: python bot.py <ip> <port> <player_number> <nickname> <depth>")
+        print("Usage: python3 bot.py <ip> <port> <player_number> <nickname> <depth>")
         sys.exit(1)
     ip = sys.argv[1]
     try:
